@@ -20,7 +20,6 @@ import (
 	"github.com/devcyclehq/go-server-sdk/v2/util"
 
 	"github.com/devcyclehq/go-server-sdk/v2/api"
-	"github.com/devcyclehq/go-server-sdk/v2/proto"
 	"github.com/matryer/try"
 )
 
@@ -52,6 +51,7 @@ type Client struct {
 	eventQueue      *EventManager
 	localBucketing  LocalBucketing
 	platformData    *PlatformData
+	sseManager      *SSEManager
 	// Set to true when the client has been initialized, regardless of whether the config has loaded successfully.
 	isInitialized                bool
 	internalOnInitializedChannel chan bool
@@ -122,7 +122,15 @@ func NewClient(sdkKey string, options *Options) (*Client, error) {
 		}
 
 		c.configManager = NewEnvironmentConfigManager(sdkKey, c.localBucketing, options, c.cfg)
-		c.configManager.StartPolling(options.ConfigPollingIntervalMS)
+		if c.DevCycleOptions.DisableServerSentEvents {
+			c.configManager.StartPolling(options.ConfigPollingIntervalMS)
+		} else {
+			err = c.configManager.StartSSE()
+			if err != nil {
+				util.Warnf("Error initializing SSE, defaulting to polling: %v", err)
+				c.configManager.StartPolling(options.ConfigPollingIntervalMS)
+			}
+		}
 
 		if c.DevCycleOptions.OnInitializedChannel != nil {
 			// TODO: Pass this error back via a channel internally
@@ -143,6 +151,11 @@ func NewClient(sdkKey string, options *Options) (*Client, error) {
 			}()
 		}
 	}
+
+	c.sseManager = &SSEManager{
+		Options: options,
+		Stream:  nil,
+	}
 	return c, nil
 }
 
@@ -153,7 +166,7 @@ func (c *Client) IsLocalBucketing() bool {
 func (c *Client) handleInitialization() {
 	c.isInitialized = true
 
-	if(c.IsLocalBucketing()){
+	if c.IsLocalBucketing() {
 		util.Infof("Client initialized with local bucketing %v", c.localBucketing.GetClientUUID())
 	}
 	if c.DevCycleOptions.OnInitializedChannel != nil {
@@ -182,57 +195,6 @@ func (c *Client) GetRawConfig() (config []byte, etag string, err error) {
 		return c.configManager.GetRawConfig(), c.configManager.GetETag(), nil
 	}
 	return nil, "", errors.New("cannot read raw config; config manager has no config")
-}
-
-func createNullableString(val string) *proto.NullableString {
-	if val == "" {
-		return &proto.NullableString{Value: "", IsNull: true}
-	} else {
-		return &proto.NullableString{Value: val, IsNull: false}
-	}
-}
-
-func createNullableDouble(val float64) *proto.NullableDouble {
-	if math.IsNaN(val) {
-		return &proto.NullableDouble{Value: 0, IsNull: true}
-	} else {
-		return &proto.NullableDouble{Value: val, IsNull: false}
-	}
-}
-
-func createNullableCustomData(data map[string]interface{}) *proto.NullableCustomData {
-	dataMap := map[string]*proto.CustomDataValue{}
-
-	if len(data) == 0 {
-		return &proto.NullableCustomData{
-			Value:  dataMap,
-			IsNull: true,
-		}
-	}
-	// pull the values from the map and convert to the nullable data objects for protobuf
-	for key, val := range data {
-		if val == nil {
-			dataMap[key] = &proto.CustomDataValue{Type: proto.CustomDataType_Null}
-			continue
-		}
-
-		switch val := val.(type) {
-		case string:
-			dataMap[key] = &proto.CustomDataValue{Type: proto.CustomDataType_Str, StringValue: val}
-		case float64:
-			dataMap[key] = &proto.CustomDataValue{Type: proto.CustomDataType_Num, DoubleValue: val}
-		case bool:
-			dataMap[key] = &proto.CustomDataValue{Type: proto.CustomDataType_Bool, BoolValue: val}
-		default:
-			// if we don't know what it is, just set it to null
-			dataMap[key] = &proto.CustomDataValue{Type: proto.CustomDataType_Null}
-		}
-	}
-
-	return &proto.NullableCustomData{
-		Value:  dataMap,
-		IsNull: false,
-	}
 }
 
 /*
@@ -340,6 +302,16 @@ func (c *Client) Variable(userdata User, key string, defaultValue interface{}) (
 	}()
 
 	if c.IsLocalBucketing() {
+		if !c.hasConfig() {
+			util.Warnf("Variable called before client initialized, returning default value")
+
+			err = c.eventQueue.QueueVariableDefaultedEvent(key, "NO CONFIG")
+			if err != nil {
+				util.Warnf("Error queuing aggregate event: ", err)
+			}
+
+			return variable, nil
+		}
 		bucketedVariable, err := c.localBucketing.Variable(userdata, key, variableType)
 
 		sameTypeAsDefault := compareTypes(bucketedVariable.Value, convertedDefaultValue)

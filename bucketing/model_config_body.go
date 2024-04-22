@@ -30,7 +30,8 @@ type configBody struct {
 	Environment            api.Environment         `json:"environment" validate:"required"`
 	Features               []*ConfigFeature        `json:"features" validate:"required"`
 	Variables              []*Variable             `json:"variables" validate:"required,dive"`
-	etag                   string                  
+	etag                   string
+	SSE                    api.SSEHost `json:"sse,omitempty"`
 	variableIdMap          map[string]*Variable
 	variableKeyMap         map[string]*Variable
 	variableIdToFeatureMap map[string]*ConfigFeature
