@@ -11,11 +11,13 @@ import (
 type recordingConfigReceiver struct {
 	configureCount int
 	etag           string
+	config         []byte
 }
 
-func (r *recordingConfigReceiver) StoreConfig(_ []byte, etag string) error {
+func (r *recordingConfigReceiver) StoreConfig(c []byte, etag string) error {
 	r.configureCount++
 	r.etag = etag
+	r.config = c
 	return nil
 }
 
@@ -28,7 +30,7 @@ func (r *recordingConfigReceiver) GetETag() string {
 }
 
 func (r *recordingConfigReceiver) GetRawConfig() []byte {
-	return nil
+	return r.config
 }
 
 func TestEnvironmentConfigManager_fetchConfig_success(t *testing.T) {
@@ -196,7 +198,7 @@ func TestEnvironmentConfigManager_fetchConfig_returns_errors_sse(t *testing.T) {
 func errorResponseChain(errorResponse httpmock.Responder, count int, configMock ...func(respcode int) httpmock.Responder) httpmock.Responder {
 
 	var successResponse httpmock.Responder
-	if configMock != nil {
+	if configMock != nil && len(configMock) >= 1 {
 		successResponse = configMock[0](200)
 	} else {
 		successResponse = httpConfigMock(200)
